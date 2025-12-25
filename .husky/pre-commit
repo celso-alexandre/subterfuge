@@ -1,0 +1,12 @@
+pnpm install
+pnpm bump:version
+git add package.json pnpm-lock.yaml
+
+go mod tidy
+git add go.mod go.sum || true
+go build .
+
+echo '🔍 Security-audit api (pnpm audit and govulncheck)'
+pnpm audit
+go install golang.org/x/vuln/cmd/govulncheck@latest
+govulncheck ./...

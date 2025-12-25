@@ -42,7 +42,6 @@ func translateCommand(args []string) {
 	from := fs.String("f", "auto", "Source language")
 	to := fs.String("t", "en", "Target language")
 	mode := fs.String("m", "create", "Output mode: 'replace' or 'create'")
-	force := fs.Bool("force", false, "Force translation even if source equals target")
 	fs.Parse(args)
 
 	if fs.NArg() == 0 {
@@ -76,12 +75,6 @@ func translateCommand(args []string) {
 	sourceLang := *from
 	if sourceLang == "auto" && detectedLang != "" {
 		sourceLang = detectedLang
-	}
-
-	if !*force && sourceLang != "auto" && cmd.NormalizeLanguageCode(sourceLang) == cmd.NormalizeLanguageCode(*to) {
-		fmt.Printf("Error: source language (%s) is the same as target language (%s)\n", sourceLang, *to)
-		fmt.Println("Use -force flag to translate anyway")
-		os.Exit(1)
 	}
 
 	output, err := handleOutputMode(input, sourceLang, *to, *mode, translated)

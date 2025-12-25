@@ -13,11 +13,15 @@ A fast and simple CLI tool for translating SRT subtitle files between languages 
 
 ## Installation
 
+Download pre-built binaries from the [releases page](https://github.com/celso-alexandre/subterfuge/releases).
+
+Or install using Go:
+
 ```bash
 go install github.com/celso-alexandre/subterfuge@latest
 ```
 
-Or build from source:
+Or build from source (requires Go installed):
 
 ```bash
 git clone https://github.com/celso-alexandre/subterfuge.git

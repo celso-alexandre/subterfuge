@@ -1,0 +1,88 @@
+name: Release
+
+on:
+   workflow_dispatch:
+   # push:
+   #    branches:
+   #       - master
+
+permissions:
+   contents: write
+
+jobs:
+   release:
+      runs-on: ubuntu-latest
+      steps:
+         - name: Checkout code
+           uses: actions/checkout@v6
+           with:
+              fetch-depth: 0
+
+         - name: Set up Go
+           uses: actions/setup-go@v5
+           with:
+              go-version: "1.25"
+
+         - name: Get version from package.json
+           id: version
+           run: |
+              VERSION=$(jq -r '.version' package.json)
+              echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+              echo "Version: v${VERSION}"
+
+         - name: Check if tag exists
+           id: check_tag
+           run: |
+              if git rev-parse "refs/tags/${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+                echo "exists=true" >> $GITHUB_OUTPUT
+              else
+                echo "exists=false" >> $GITHUB_OUTPUT
+              fi
+
+         - name: Create tag
+           if: steps.check_tag.outputs.exists == 'false'
+           run: |
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git tag ${{ steps.version.outputs.version }}
+              git push origin ${{ steps.version.outputs.version }}
+
+         - name: Build binaries
+           if: steps.check_tag.outputs.exists == 'false'
+           run: |
+              mkdir -p dist
+
+              # Linux AMD64
+              GOOS=linux GOARCH=amd64 go build -o dist/subterfuge-linux-amd64 .
+
+              # Linux ARM64
+              GOOS=linux GOARCH=arm64 go build -o dist/subterfuge-linux-arm64 .
+
+              # macOS AMD64
+              GOOS=darwin GOARCH=amd64 go build -o dist/subterfuge-darwin-amd64 .
+
+              # macOS ARM64 (Apple Silicon)
+              GOOS=darwin GOARCH=arm64 go build -o dist/subterfuge-darwin-arm64 .
+
+              # Windows AMD64
+              GOOS=windows GOARCH=amd64 go build -o dist/subterfuge-windows-amd64.exe .
+
+         - name: Create Release
+           if: steps.check_tag.outputs.exists == 'false'
+           uses: softprops/action-gh-release@v2
+           with:
+              tag_name: ${{ steps.version.outputs.version }}
+              name: Release ${{ steps.version.outputs.version }}
+              draft: false
+              prerelease: false
+              files: |
+                 dist/*
+                 README.md
+              body: |
+                 ### Installation
+
+                 Download the appropriate binary for your platform and add it to your PATH.
+
+                 **Requirements:** ffmpeg must be installed for the `extract` command.
+           env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
