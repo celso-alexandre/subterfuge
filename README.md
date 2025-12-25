@@ -5,7 +5,7 @@ A fast and simple CLI tool for translating SRT subtitle files between languages 
 ## Features
 
 - 🌍 Translate subtitles to any language with auto-detection
-- 📝 Preserves original timing and formatting
+- 📝 Preserves original timing
 - 🚀 Batch translation for improved speed
 - 💯 Free - uses Google Translate's public API
 - ⚡ Progress indicator during translation
@@ -28,8 +28,13 @@ go build
 ## Usage
 
 ```bash
-subterfuge [options] <input.srt>
+subterfuge [command] [options] <input.srt>
 ```
+
+### Commands
+
+- `extract` - Extract SRT file out of video file (requires ffmpeg)
+- `translate` - Translate the given SRT file
 
 ### Options
 
@@ -39,27 +44,35 @@ subterfuge [options] <input.srt>
 
 ### Examples
 
+Extract SRT subtitle from video:
+
+```bash
+subterfuge extract movie.mp4
+# Creates: movie.srt
+```
+
 Translate to Portuguese (replace mode):
 
 ```bash
-subterfuge -t pt -m replace movie.srt
+subterfuge translate -t pt -m replace movie.srt
+# Renames original to: movie.<input-lang>.srt
 ```
 
 Translate to Spanish, creating a new file:
 
 ```bash
-subterfuge -t es -m create movie.srt
+subterfuge translate -t es -m create movie.srt
 # Creates: movie.es.srt
 ```
 
 Translate from French to Japanese:
 
 ```bash
-subterfuge -s fr -t ja -m create anime.srt
+subterfuge translate -s fr -t ja -m create anime.srt
 # Creates: anime.ja.srt
 ```
 
-## Modes
+## Translate Modes
 
 ### Create Mode (default)
 
@@ -88,6 +101,7 @@ Use ISO 639-1 language codes:
 
 ## How It Works
 
+0. (Optional) Extracts SRT from video using ffmpeg
 1. Parses the input SRT file into subtitle blocks
 2. Auto-detects source language if not specified
 3. Outputs translated SRT file with original timing preserved

@@ -3,28 +3,56 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/celso-alexandre/subterfuge/cmd"
 )
 
 func main() {
-	from := flag.String("s", "auto", "Source language")
-	to := flag.String("t", "en", "Target language")
-	mode := flag.String("m", "create", "Output mode: 'create' or 'replace'")
-	// force := flag.Bool("force", false, "Force translation even if source equals target")
-	flag.Parse()
-
-	args := flag.Args()
-	if len(args) == 0 {
-		fmt.Println("Error: input file required")
-		fmt.Println("Usage: subterfuge [options] <input.srt>")
-		flag.PrintDefaults()
+	if len(os.Args) < 2 {
+		printUsage()
 		os.Exit(1)
 	}
 
-	input := args[0]
+	command := os.Args[1]
+
+	switch command {
+	case "translate":
+		translateCommand(os.Args[2:])
+	case "extract":
+		extractCommand(os.Args[2:])
+	default:
+		fmt.Printf("Unknown command: %s\n", command)
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println("Usage: subterfuge <command> [options]")
+	fmt.Println("\nCommands:")
+	fmt.Println("  translate    Translate an SRT file between languages")
+	fmt.Println("  extract      Extract subtitles from a video file")
+	fmt.Println("\nUse 'subterfuge <command> -h' for more information about a command")
+}
+
+func translateCommand(args []string) {
+	fs := flag.NewFlagSet("translate", flag.ExitOnError)
+	from := fs.String("f", "auto", "Source language")
+	to := fs.String("t", "en", "Target language")
+	mode := fs.String("m", "create", "Output mode: 'replace' or 'create'")
+	force := fs.Bool("force", false, "Force translation even if source equals target")
+	fs.Parse(args)
+
+	if fs.NArg() == 0 {
+		fmt.Println("Error: input file required")
+		fmt.Println("Usage: subterfuge translate [options] <input.srt>")
+		fs.PrintDefaults()
+		os.Exit(1)
+	}
+
+	input := fs.Arg(0)
 
 	if *mode != "replace" && *mode != "create" {
 		fmt.Println("Error: mode must be 'replace' or 'create'")
@@ -39,7 +67,7 @@ func main() {
 	}
 
 	fmt.Printf("Translating from %s to %s...\n", *from, *to)
-	translated, detectedLang, err := translateSRT(string(content), *from, *to)
+	translated, detectedLang, err := cmd.TranslateSRT(string(content), *from, *to)
 	if err != nil {
 		fmt.Printf("Error translating: %v\n", err)
 		os.Exit(1)
@@ -50,11 +78,11 @@ func main() {
 		sourceLang = detectedLang
 	}
 
-	// if !*force && sourceLang != "auto" && normalizeLanguageCode(sourceLang) == normalizeLanguageCode(*to) {
-	// 	fmt.Printf("Error: source language (%s) is the same as target language (%s)\n", sourceLang, *to)
-	// 	fmt.Println("Use -force flag to translate anyway")
-	// 	os.Exit(1)
-	// }
+	if !*force && sourceLang != "auto" && cmd.NormalizeLanguageCode(sourceLang) == cmd.NormalizeLanguageCode(*to) {
+		fmt.Printf("Error: source language (%s) is the same as target language (%s)\n", sourceLang, *to)
+		fmt.Println("Use -force flag to translate anyway")
+		os.Exit(1)
+	}
 
 	output, err := handleOutputMode(input, sourceLang, *to, *mode, translated)
 	if err != nil {
@@ -65,45 +93,32 @@ func main() {
 	fmt.Printf("✓ Translated file saved to %s\n", output)
 }
 
-func normalizeLanguageCode(code string) string {
-	parts := strings.Split(strings.ToLower(code), "-")
-	return parts[0]
-}
+func extractCommand(args []string) {
+	fs := flag.NewFlagSet("extract", flag.ExitOnError)
+	fs.Parse(args)
 
-func buildSubtitlePath(dir, nameWithoutExt, ext, lang string) string {
-	normalizedLang := normalizeLanguageCode(lang)
-	return filepath.Join(dir, nameWithoutExt+"."+normalizedLang+ext)
-}
-
-func extractFilenameParts(path string) (dir, nameWithoutExt, ext string) {
-	dir = filepath.Dir(path)
-	base := filepath.Base(path)
-	ext = filepath.Ext(base)
-	nameWithoutExt = strings.TrimSuffix(base, ext)
-	return
-}
-
-func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
+	if fs.NArg() == 0 {
+		fmt.Println("Error: video file required")
+		fmt.Println("Usage: subterfuge extract <video_file>")
+		os.Exit(1)
 	}
-	defer sourceFile.Close()
 
-	destFile, err := os.Create(dst)
+	videoFile := fs.Arg(0)
+
+	fmt.Printf("Extracting subtitles from %s...\n", videoFile)
+	outputSRT, err := cmd.ExtractSubtitles(videoFile, 0)
 	if err != nil {
-		return err
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
 	}
-	defer destFile.Close()
 
-	_, err = io.Copy(destFile, sourceFile)
-	return err
+	fmt.Printf("✓ Subtitles extracted to %s\n", outputSRT)
 }
 
 func handleOutputMode(input, sourceLang, targetLang, mode, content string) (string, error) {
-	dir, nameWithoutExt, ext := extractFilenameParts(input)
+	dir, nameWithoutExt, ext := cmd.ExtractFilenameParts(input)
 
-	targetPath := buildSubtitlePath(dir, nameWithoutExt, ext, targetLang)
+	targetPath := cmd.BuildSubtitlePath(dir, nameWithoutExt, ext, targetLang)
 	if _, err := os.Stat(targetPath); err == nil {
 		return "", fmt.Errorf("destination file already exists: %s", targetPath)
 	}
@@ -136,40 +151,30 @@ func handleOutputMode(input, sourceLang, targetLang, mode, content string) (stri
 	}()
 
 	if mode == "replace" {
-		currentNormalizedName := buildSubtitlePath(dir, nameWithoutExt, ext, sourceLang)
+		currentNormalizedName := cmd.BuildSubtitlePath(dir, nameWithoutExt, ext, sourceLang)
 
 		if input == currentNormalizedName {
-			if err := moveFile(tempPath, input); err != nil {
+			if err := cmd.MoveFile(tempPath, input); err != nil {
 				return "", fmt.Errorf("failed to write translated file: %v", err)
 			}
 			return input, nil
 		}
 
-		sourcePath := buildSubtitlePath(dir, nameWithoutExt, ext, sourceLang)
+		sourcePath := cmd.BuildSubtitlePath(dir, nameWithoutExt, ext, sourceLang)
 		if _, err := os.Stat(sourcePath); err == nil {
 			return "", fmt.Errorf("cannot rename: %s already exists", sourcePath)
 		}
 
-		if err := moveFile(tempPath, targetPath); err != nil {
+		if err := cmd.MoveFile(tempPath, targetPath); err != nil {
 			return "", fmt.Errorf("failed to write translated file: %v", err)
 		}
 
 		return targetPath, nil
 	}
 
-	if err := moveFile(tempPath, targetPath); err != nil {
+	if err := cmd.MoveFile(tempPath, targetPath); err != nil {
 		return "", fmt.Errorf("failed to create file: %v", err)
 	}
 
 	return targetPath, nil
-}
-
-func moveFile(src, dst string) error {
-	if err := os.Rename(src, dst); err != nil {
-		if copyErr := copyFile(src, dst); copyErr != nil {
-			return copyErr
-		}
-		os.Remove(src)
-	}
-	return nil
 }

@@ -1,4 +1,4 @@
-package main
+package cmd
 
 import (
 	"encoding/json"
@@ -19,8 +19,13 @@ type Subtitle struct {
 
 const batchSize = 20
 
-func translateSRT(content, from, to string) (string, string, error) {
-	subtitles := parseSRT(content)
+func StripHTMLTags(text string) string {
+	re := regexp.MustCompile(`<[^>]*>`)
+	return re.ReplaceAllString(text, "")
+}
+
+func TranslateSRT(content, from, to string) (string, string, error) {
+	subtitles := ParseSRT(content)
 	if len(subtitles) == 0 {
 		return "", "", fmt.Errorf("no subtitles found in file")
 	}
@@ -35,12 +40,31 @@ func translateSRT(content, from, to string) (string, string, error) {
 
 		texts := make([]string, len(batch))
 		for j, sub := range batch {
-			texts[j] = sub.Text
+			texts[j] = StripHTMLTags(sub.Text)
 		}
 		combinedText := strings.Join(texts, "\n###SUBTITLE_SEPARATOR###\n")
 
-		translatedText, detected, err := translateText(combinedText, from, to)
+		translatedText, detected, err := TranslateText(combinedText, from, to)
 		if err != nil {
+			if strings.Contains(err.Error(), "413") {
+				fmt.Printf("\nBatch too large, translating individually...\n")
+				for j, sub := range batch {
+					text, det, errSingle := TranslateText(sub.Text, from, to)
+					if errSingle != nil {
+						return "", "", fmt.Errorf("translation failed at subtitle %d: %v", i+j+1, errSingle)
+					}
+					if i == 0 && j == 0 && det != "" {
+						detectedLang = det
+					}
+					translated[i+j] = Subtitle{
+						Index:     sub.Index,
+						Timestamp: sub.Timestamp,
+						Text:      text,
+					}
+					fmt.Printf("\rTranslating: %d/%d", i+j+1, len(subtitles))
+				}
+				continue
+			}
 			return "", "", fmt.Errorf("translation failed at batch starting at %d: %v", i+1, err)
 		}
 
@@ -52,7 +76,7 @@ func translateSRT(content, from, to string) (string, string, error) {
 
 		if len(translatedTexts) != len(batch) {
 			for j, sub := range batch {
-				text, _, err := translateText(sub.Text, from, to)
+				text, _, err := TranslateText(sub.Text, from, to)
 				if err != nil {
 					return "", "", fmt.Errorf("translation failed at subtitle %d: %v", i+j+1, err)
 				}
@@ -76,10 +100,10 @@ func translateSRT(content, from, to string) (string, string, error) {
 	}
 	fmt.Println()
 
-	return formatSRT(translated), detectedLang, nil
+	return FormatSRT(translated), detectedLang, nil
 }
 
-func translateText(text, from, to string) (string, string, error) {
+func TranslateText(text, from, to string) (string, string, error) {
 	baseURL := "https://translate.googleapis.com/translate_a/single"
 	params := url.Values{}
 	params.Add("client", "gtx")
@@ -143,7 +167,7 @@ func translateText(text, from, to string) (string, string, error) {
 	return translated.String(), detectedLang, nil
 }
 
-func parseSRT(content string) []Subtitle {
+func ParseSRT(content string) []Subtitle {
 	blocks := regexp.MustCompile(`\n\n+`).Split(strings.TrimSpace(content), -1)
 	subtitles := make([]Subtitle, 0)
 
@@ -171,7 +195,7 @@ func parseSRT(content string) []Subtitle {
 	return subtitles
 }
 
-func formatSRT(subtitles []Subtitle) string {
+func FormatSRT(subtitles []Subtitle) string {
 	var result strings.Builder
 
 	for i, sub := range subtitles {
