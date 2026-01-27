@@ -1,6 +1,6 @@
 {
    "name": "subterfuge",
-   "version": "1.0.0",
+   "version": "1.0.1",
    "scripts": {
       "dev": "go run .",
       "build": "go build -o subterfuge .",

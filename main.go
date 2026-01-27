@@ -99,7 +99,7 @@ func extractCommand(args []string) {
 	videoFile := fs.Arg(0)
 
 	fmt.Printf("Extracting subtitles from %s...\n", videoFile)
-	outputSRT, err := cmd.ExtractSubtitles(videoFile, 0)
+	outputSRT, err := cmd.ExtractSubtitle(videoFile, 0)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
