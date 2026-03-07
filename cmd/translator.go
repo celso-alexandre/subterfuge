@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type Subtitle struct {
@@ -17,7 +20,8 @@ type Subtitle struct {
 	Text      string
 }
 
-const batchSize = 20
+const batchSize = 50
+const maxParallelRequests = 2
 
 func StripHTMLTags(text string) string {
 	re := regexp.MustCompile(`<[^>]*>`)
@@ -31,76 +35,166 @@ func TranslateSRT(content, from, to string) (string, string, error) {
 	}
 
 	translated := make([]Subtitle, len(subtitles))
+
+	type batchJob struct {
+		start int
+		end   int
+	}
+
+	jobs := make(chan batchJob)
+	errCh := make(chan error, 1)
+
+	var doneCount int64
+
 	var detectedLang string
-
-	for i := 0; i < len(subtitles); i += batchSize {
-		end := min(i+batchSize, len(subtitles))
-
-		batch := subtitles[i:end]
-
-		texts := make([]string, len(batch))
-		for j, sub := range batch {
-			texts[j] = StripHTMLTags(sub.Text)
+	var detectedOnce sync.Once
+	setDetected := func(lang string) {
+		if lang == "" {
+			return
 		}
-		combinedText := strings.Join(texts, "\n###SUBTITLE_SEPARATOR###\n")
+		detectedOnce.Do(func() {
+			detectedLang = lang
+		})
+	}
 
-		translatedText, detected, err := TranslateText(combinedText, from, to)
-		if err != nil {
-			if strings.Contains(err.Error(), "413") {
-				fmt.Printf("\nBatch too large, translating individually...\n")
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+
+		sep := "\n###SUBTITLE_SEPARATOR###\n"
+
+		for job := range jobs {
+			batch := subtitles[job.start:job.end]
+
+			texts := make([]string, len(batch))
+			for j, sub := range batch {
+				texts[j] = StripHTMLTags(sub.Text)
+			}
+			combinedText := strings.Join(texts, sep)
+
+			translatedText, detected, err := TranslateText(
+				combinedText,
+				from,
+				to,
+			)
+			if err != nil {
+				if strings.Contains(err.Error(), "413") {
+					for j, sub := range batch {
+						text, det, errSingle := TranslateText(
+							sub.Text,
+							from,
+							to,
+						)
+						if errSingle != nil {
+							select {
+							case errCh <- fmt.Errorf(
+								"translation failed at subtitle %d: %v",
+								job.start+j+1,
+								errSingle,
+							):
+							default:
+							}
+							return
+						}
+
+						setDetected(det)
+
+						translated[job.start+j] = Subtitle{
+							Index:     sub.Index,
+							Timestamp: sub.Timestamp,
+							Text:      text,
+						}
+
+						n := atomic.AddInt64(&doneCount, 1)
+						fmt.Printf("\rTranslating: %d/%d", n, len(subtitles))
+					}
+					continue
+				}
+
+				select {
+				case errCh <- fmt.Errorf(
+					"translation failed at batch starting at %d: %v",
+					job.start+1,
+					err,
+				):
+				default:
+				}
+				return
+			}
+
+			setDetected(detected)
+
+			translatedTexts := strings.Split(translatedText, sep)
+
+			if len(translatedTexts) != len(batch) {
 				for j, sub := range batch {
 					text, det, errSingle := TranslateText(sub.Text, from, to)
 					if errSingle != nil {
-						return "", "", fmt.Errorf("translation failed at subtitle %d: %v", i+j+1, errSingle)
+						select {
+						case errCh <- fmt.Errorf(
+							"translation failed at subtitle %d: %v",
+							job.start+j+1,
+							errSingle,
+						):
+						default:
+						}
+						return
 					}
-					if i == 0 && j == 0 && det != "" {
-						detectedLang = det
-					}
-					translated[i+j] = Subtitle{
+
+					setDetected(det)
+
+					translated[job.start+j] = Subtitle{
 						Index:     sub.Index,
 						Timestamp: sub.Timestamp,
 						Text:      text,
 					}
-					fmt.Printf("\rTranslating: %d/%d", i+j+1, len(subtitles))
+
+					n := atomic.AddInt64(&doneCount, 1)
+					fmt.Printf("\rTranslating: %d/%d", n, len(subtitles))
 				}
 				continue
 			}
-			return "", "", fmt.Errorf("translation failed at batch starting at %d: %v", i+1, err)
-		}
 
-		if i == 0 && detected != "" {
-			detectedLang = detected
-		}
-
-		translatedTexts := strings.Split(translatedText, "\n###SUBTITLE_SEPARATOR###\n")
-
-		if len(translatedTexts) != len(batch) {
 			for j, sub := range batch {
-				text, _, err := TranslateText(sub.Text, from, to)
-				if err != nil {
-					return "", "", fmt.Errorf("translation failed at subtitle %d: %v", i+j+1, err)
-				}
-				translated[i+j] = Subtitle{
-					Index:     sub.Index,
-					Timestamp: sub.Timestamp,
-					Text:      text,
-				}
-			}
-		} else {
-			for j, sub := range batch {
-				translated[i+j] = Subtitle{
+				translated[job.start+j] = Subtitle{
 					Index:     sub.Index,
 					Timestamp: sub.Timestamp,
 					Text:      strings.TrimSpace(translatedTexts[j]),
 				}
+
+				n := atomic.AddInt64(&doneCount, 1)
+				fmt.Printf("\rTranslating: %d/%d", n, len(subtitles))
 			}
 		}
-
-		fmt.Printf("\rTranslating: %d/%d", end, len(subtitles))
 	}
-	fmt.Println()
 
-	return FormatSRT(translated), detectedLang, nil
+	wg.Add(maxParallelRequests)
+	for i := 0; i < maxParallelRequests; i++ {
+		go worker()
+	}
+
+	go func() {
+		defer close(jobs)
+		for i := 0; i < len(subtitles); i += batchSize {
+			end := min(i+batchSize, len(subtitles))
+			jobs <- batchJob{start: i, end: end}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case err := <-errCh:
+		fmt.Println()
+		return "", "", err
+	case <-done:
+		fmt.Println()
+		return FormatSRT(translated), detectedLang, nil
+	}
 }
 
 func TranslateText(text, from, to string) (string, string, error) {
@@ -112,59 +206,116 @@ func TranslateText(text, from, to string) (string, string, error) {
 	params.Add("dt", "t")
 	params.Add("q", text)
 
-	resp, err := http.Get(baseURL + "?" + params.Encode())
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
+	reqURL := baseURL + "?" + params.Encode()
 
-	if resp.StatusCode != 200 {
-		return "", "", fmt.Errorf("API returned status %d", resp.StatusCode)
+	client := &http.Client{
+		Timeout: 20 * time.Second,
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", err
-	}
+	const maxRetries = 10
 
-	var result []any
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", "", err
-	}
-
-	if len(result) == 0 {
-		return "", "", fmt.Errorf("empty translation result")
-	}
-
-	translations, ok := result[0].([]any)
-	if !ok {
-		return "", "", fmt.Errorf("unexpected translation format")
-	}
-
-	var translated strings.Builder
-	for _, t := range translations {
-		if t == nil {
-			continue
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err := client.Get(reqURL)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				backoffSleep(attempt)
+				continue
+			}
+			return "", "", err
 		}
-		parts, ok := t.([]any)
-		if !ok || len(parts) == 0 {
-			continue
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if readErr != nil {
+			lastErr = readErr
+			if attempt < maxRetries {
+				backoffSleep(attempt)
+				continue
+			}
+			return "", "", readErr
 		}
-		if parts[0] != nil {
-			if str, ok := parts[0].(string); ok {
-				translated.WriteString(str)
+
+		if resp.StatusCode == 429 || (resp.StatusCode >= 500 &&
+			resp.StatusCode <= 599) {
+			lastErr = fmt.Errorf("API returned status %d", resp.StatusCode)
+			if attempt < maxRetries {
+				backoffSleep(attempt)
+				continue
+			}
+			return "", "", lastErr
+		}
+
+		if resp.StatusCode != 200 {
+			return "", "", fmt.Errorf("API returned status %d", resp.StatusCode)
+		}
+
+		var result []any
+		if err := json.Unmarshal(body, &result); err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				backoffSleep(attempt)
+				continue
+			}
+			return "", "", err
+		}
+
+		if len(result) == 0 {
+			lastErr = fmt.Errorf("empty translation result")
+			if attempt < maxRetries {
+				backoffSleep(attempt)
+				continue
+			}
+			return "", "", lastErr
+		}
+
+		translations, ok := result[0].([]any)
+		if !ok {
+			lastErr = fmt.Errorf("unexpected translation format")
+			if attempt < maxRetries {
+				backoffSleep(attempt)
+				continue
+			}
+			return "", "", lastErr
+		}
+
+		var translated strings.Builder
+		for _, t := range translations {
+			if t == nil {
+				continue
+			}
+			parts, ok := t.([]any)
+			if !ok || len(parts) == 0 {
+				continue
+			}
+			if parts[0] != nil {
+				if str, ok := parts[0].(string); ok {
+					translated.WriteString(str)
+				}
 			}
 		}
-	}
 
-	var detectedLang string
-	if len(result) > 2 && result[2] != nil {
-		if lang, ok := result[2].(string); ok {
-			detectedLang = lang
+		var detectedLang string
+		if len(result) > 2 && result[2] != nil {
+			if lang, ok := result[2].(string); ok {
+				detectedLang = lang
+			}
 		}
+
+		return translated.String(), detectedLang, nil
 	}
 
-	return translated.String(), detectedLang, nil
+	return "", "", lastErr
+}
+
+func backoffSleep(attempt int) {
+	d := time.Duration(attempt) * 250 * time.Millisecond
+	if d > 3*time.Second {
+		d = 3 * time.Second
+	}
+	time.Sleep(d)
 }
 
 func ParseSRT(content string) []Subtitle {
